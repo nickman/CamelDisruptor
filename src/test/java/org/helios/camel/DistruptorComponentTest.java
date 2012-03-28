@@ -42,8 +42,8 @@ public class DistruptorComponentTest extends CamelTestSupport {
     protected RouteBuilder createRouteBuilder() throws Exception {
         return new RouteBuilder() {
             public void configure() {
-                from("dtr://foo")
-                  .to("dtr://bar")
+                from("disruptor://foo")
+                  .to("disruptor://bar")
                   .to("mock:result");
             }
         };

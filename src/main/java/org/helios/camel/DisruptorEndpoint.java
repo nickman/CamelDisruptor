@@ -16,22 +16,27 @@
  */
 package org.helios.camel;
 
-import java.util.HashMap;
 import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.CopyOnWriteArraySet;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 
+import org.apache.camel.Component;
 import org.apache.camel.Consumer;
+import org.apache.camel.MultipleConsumersSupport;
 import org.apache.camel.Processor;
 import org.apache.camel.Producer;
+import org.apache.camel.api.management.ManagedAttribute;
+import org.apache.camel.api.management.ManagedOperation;
+import org.apache.camel.api.management.ManagedResource;
 import org.apache.camel.impl.DefaultEndpoint;
+import org.apache.log4j.Logger;
 import org.helios.camel.event.ExchangeValueEvent;
 
-import com.lmax.disruptor.ClaimStrategy;
 import com.lmax.disruptor.RingBuffer;
-import com.lmax.disruptor.SleepingWaitStrategy;
-import com.lmax.disruptor.WaitStrategy;
+import com.lmax.disruptor.dsl.Disruptor;
 
 /**
  * <p>Title: DisruptorEndpoint</p>
@@ -40,84 +45,43 @@ import com.lmax.disruptor.WaitStrategy;
  * @author Whitehead (nwhitehead AT heliosdev DOT org)
  * <p><code>org.helios.camel.DisruptorEndpoint</code></p>
  */
-public class DisruptorEndpoint extends DefaultEndpoint {
-	/** The endpoint's ringbuffer */
-	protected RingBuffer<ExchangeValueEvent> ringBuffer;
-	/** Indicates if the endpoint should force a single publisher model and synchronize incoming events. Defaults to false */
-	protected boolean forceSinglePub = false;
-	/** The sequence claim strategy */
-	protected ClaimStrategy claimStrategy = null;
-	/** The sequence claim buffer size. Defaults to {@link DisruptorEndpoint#DEFAULT_CLAIM_BUFFER_SIZE} */
-	protected int claimBufferSize = DEFAULT_CLAIM_BUFFER_SIZE;
+@ManagedResource(description = "Managed DisruptorEndpoint")
+public class DisruptorEndpoint extends DefaultEndpoint implements MultipleConsumersSupport {
+	/** The endpoint's disruptor */
+	protected Disruptor<ExchangeValueEvent> disruptor;
 	/** The claim timeout when calling {@link RingBuffer#next(long, java.util.concurrent.TimeUnit)}. Defaults to {@link DisruptorEndpoint#DEFAULT_CLAIM_TIMEOUT}. Values of <code>< 1</code> will not have a timeout.*/
 	protected long claimTimeout = -1;
 	/** The claim timeout unit when calling {@link RingBuffer#next(long, java.util.concurrent.TimeUnit)}. Defaults to {@link DisruptorEndpoint#DEFAULT_CLAIM_TIMEOUT_UNIT}*/
-	protected TimeUnit claimTimeoutUnit = DEFAULT_CLAIM_TIMEOUT_UNIT;
-	/** The configured event processor event wait strategy instance. */
-	protected WaitStrategy waitStrategy = null;
-	/** The event processor wait strategy. Defaults to {@link ConsumerWaitStrategy#SLEEP} */
-	protected ConsumerWaitStrategy consumerWaitStrategy = ConsumerWaitStrategy.SLEEP;
+	protected TimeUnit claimTimeoutUnit = null;
+	/** If true, a copy of the exchange will be published to the ring buffer, otherwise, the same instance will be published */
+	protected boolean copyExchange;	
 	/** The executor thread pool built to execute event processors */
 	protected ThreadPoolExecutor threadPool = null;
-	/** The logical name of this endpoint */
-	protected String endpointName = null;
-	/** The endpoint serial number*/
-	protected final long endpointSerial = serial.incrementAndGet();
+	/** A set of the current disruptor producers */
+    private final Set<DisruptorProducer> producers = new CopyOnWriteArraySet<DisruptorProducer>();
+    /** A set of the current disruptor consumers */
+    private final Set<DisruptorConsumer> consumers = new CopyOnWriteArraySet<DisruptorConsumer>();	
+	/** Claim timeout counter */
+	protected final AtomicLong claimTimeouts = new AtomicLong(0L);
+	/** Instance logger */
+	protected final Logger log;
 	
-	
-	/** A serial number generator for assigning to endpoints */
-	protected static final AtomicLong serial = new AtomicLong(0L);
-	
-	/** The default claim buffer size */
-	public static final int DEFAULT_CLAIM_BUFFER_SIZE = 1024;
-	/** The default claim timeout */
-	public static final long DEFAULT_CLAIM_TIMEOUT = -1;
-	/** The default claim timeout unit */
-	public static final TimeUnit DEFAULT_CLAIM_TIMEOUT_UNIT = TimeUnit.MILLISECONDS;
-	/** The default event processor wait strategy */
-	public static final WaitStrategy DEFAULT_WAIT_STRATEGY = new SleepingWaitStrategy();
-	
-    /** URI option name for Claim Buffer Size */
-    public static final String OPTION_CLAIMBUFFERSIZE = "claimbuffsize";
-    /** URI option name for Claim Timeout */
-    public static final String OPTION_CLAIMTIMEOUT = "claimto";
-    /** URI option name for Claim Timeout Unit*/
-    public static final String OPTION_CLAIMTIMEOUTUNIT = "claimtounit";
-    /** URI option name for Force single threaded prodcuer */
-    public static final String OPTION_SINGLEPUB = "singlepub";
-    /** URI option name for event processor wait strategy */
-    public static final String OPTION_WAITSTRAT = "waitstrat";
-	
-	
-	/*
-	 * Configuration:
-	 * ==============
-	 * Ring Configuration
-	 * 		Forced singleton (single producer)
-	 * 		Claim Strategy and Buffer Size
-	 * 		Claim Timeout
-	 * 		
-	 * Executor Pool
-	 * Wait Strategy
-	 */
-	
-    /**
-     * Creates a new DisruptorEndpoint with a default name
-     */
-    public DisruptorEndpoint() {
-    	setSynchronous(false); 
-    	endpointName = getClass().getSimpleName() + "#" + endpointSerial;
-    }
-
     /**
      * Creates a new DisruptorEndpoint
      * @param uri The endpoint URI
      * @param component The parent component
+     * @param copyExchange If true, a copy of the exchange will be published to the ring buffer, otherwise, the same instance will be published
+     * @param timeout The publisher timeout 
+     * @param unit The publisher timeout unit
      */
-    public DisruptorEndpoint(String uri, DisruptorComponent component) {
+    public DisruptorEndpoint(String uri, Component component, boolean copyExchange, long timeout, TimeUnit unit) {
         super(uri, component);
-    	setSynchronous(false); 
-    	endpointName = getClass().getSimpleName() + "#" + endpointSerial;        
+        log = Logger.getLogger(getClass().getName() + "-" + this.getEndpointKey());
+        log.info("Creating Disruptor Endpoint [" + uri + "]");
+    	this.copyExchange = copyExchange;
+    	this.claimTimeout = timeout;
+    	this.claimTimeoutUnit = unit;
+        setSynchronous(false);     	 
     }
 
 
@@ -126,7 +90,10 @@ public class DisruptorEndpoint extends DefaultEndpoint {
      * @see org.apache.camel.Endpoint#createProducer()
      */
     public Producer createProducer() throws Exception {
-        return new DisruptorProducer(this);
+    	log.info("Creating Disruptor Procuer");
+    	DisruptorProducer producer = new DisruptorProducer(this, disruptor, copyExchange, claimTimeout, claimTimeoutUnit);
+    	producers.add(producer);
+    	return producer;
     }
 
     /**
@@ -134,7 +101,10 @@ public class DisruptorEndpoint extends DefaultEndpoint {
      * @see org.apache.camel.Endpoint#createConsumer(org.apache.camel.Processor)
      */
     public Consumer createConsumer(Processor processor) throws Exception {
-        return new DisruptorConsumer(this, processor);
+    	log.info("Creating Disruptor Consumer for [" + processor + "]");
+    	DisruptorConsumer consumer = new DisruptorConsumer(this, processor);
+    	consumers.add(consumer);
+    	return consumer;
     }
 
     /**
@@ -146,38 +116,20 @@ public class DisruptorEndpoint extends DefaultEndpoint {
     }
     
     /**
+     * The capacity of the ring buffer to hold entries.
+     * @return the size of the RingBuffer.
+     */
+    public int getBufferSize() {
+        return disruptor.getRingBuffer().getBufferSize();
+    }    
+    
+    /**
      * {@inheritDoc}
      * @see org.apache.camel.impl.DefaultEndpoint#configureProperties(java.util.Map)
      */
     @Override
     public void configureProperties(Map<String, Object> options) {
-    	Map<String, Object> caseInsOptions = new HashMap<String, Object>();
-    	for(Map.Entry<String, Object> entry: options.entrySet()) {
-    		caseInsOptions.put(entry.getKey().trim().toLowerCase(), entry.getValue());
-    	}
-    	Integer cbs = (Integer)caseInsOptions.get(OPTION_CLAIMBUFFERSIZE);
-    	if(cbs!=null) {
-    		claimBufferSize = cbs;
-    	}
-    	Long cto = (Long)caseInsOptions.get(OPTION_CLAIMBUFFERSIZE);
-    	if(cto!=null) {
-    		claimTimeout = cto;
-    	}
-    	
-    	Object unit = caseInsOptions.get(OPTION_CLAIMTIMEOUTUNIT);
-    	if(unit!=null) {
-    		claimTimeoutUnit = TimeUnit.valueOf(unit.toString().trim().toUpperCase());
-    	}
-    	
-    	Object force = caseInsOptions.get(OPTION_SINGLEPUB);
-    	if(force!=null) {
-    		forceSinglePub = Boolean.parseBoolean(force.toString().trim());
-    	} 
-    	
-    	Object waitStrat = caseInsOptions.get(OPTION_WAITSTRAT);
-    	if(waitStrat!=null) {
-    		consumerWaitStrategy = ConsumerWaitStrategy.valueOf(waitStrat.toString().trim().toUpperCase());
-    	}
+    	disruptor = (Disruptor)options.get("disruptor");
     }    
     
     
@@ -186,11 +138,17 @@ public class DisruptorEndpoint extends DefaultEndpoint {
      * @see org.apache.camel.impl.DefaultEndpoint#doStart()
      */
     protected void doStart() {
-    	
+    	log.info("Starting Disruptor");
+    	disruptor.start();
     }
     
+    /**
+     * {@inheritDoc}
+     * @see org.apache.camel.impl.DefaultEndpoint#doStop()
+     */
     protected void doStop() {
-    	
+    	log.info("Stopping Disruptor");
+    	disruptor.shutdown();
     }
     
     
@@ -198,14 +156,14 @@ public class DisruptorEndpoint extends DefaultEndpoint {
      * @param producer
      */
     void onStarted(DisruptorProducer producer) {
-//        producers.add(producer);
+        producers.add(producer);
     }
 
     /**
      * @param producer
      */
     void onStopped(DisruptorProducer producer) {
-//        producers.remove(producer);
+        producers.remove(producer);
     }
     
     
@@ -214,7 +172,7 @@ public class DisruptorEndpoint extends DefaultEndpoint {
      * @throws Exception
      */
     void onStarted(DisruptorConsumer consumer) throws Exception {
-//        consumers.add(consumer);
+        consumers.add(consumer);
 //        if (isMultipleConsumers()) {
 //            updateMulticastProcessor();
 //        }
@@ -225,53 +183,12 @@ public class DisruptorEndpoint extends DefaultEndpoint {
      * @throws Exception
      */
     void onStopped(DisruptorConsumer consumer) throws Exception {
-//        consumers.remove(consumer);
+        consumers.remove(consumer);
 //        if (isMultipleConsumers()) {
 //            updateMulticastProcessor();
 //        }
     }
 
-	/**
-	 * Indicates if the component is forcing a single ring buffer producer
-	 * @return the forceSinglePub
-	 */
-	public boolean isForceSinglePub() {
-		return forceSinglePub;
-	}
-
-	/**
-	 * Forces a single ring buffer producer and synchronizes camel producers.
-	 * If this is not forced, the claim strategy will be set according to the number of configured producers when the endpoint starts. 
-	 * @param forceSinglePub the forceSinglePub to set
-	 */
-	public void setForceSinglePub(boolean forceSinglePub) {
-		this.forceSinglePub = forceSinglePub;
-	}
-
-	/**
-	 * Returns an expression describing the claim strategy
-	 * @return the claimStrategy
-	 */
-	public String getClaimStrategy() {
-		return claimStrategy.getClass().getSimpleName() + "[" + claimStrategy.getBufferSize() + "]";
-	}
-
-
-	/**
-	 * Returns the configured claim buffer size 
-	 * @return the claimBufferSize
-	 */
-	public int getClaimBufferSize() {
-		return claimBufferSize;
-	}
-
-	/**
-	 * Sets the claim buffer size
-	 * @param claimBufferSize the claim Buffer Size to set
-	 */
-	public void setClaimBufferSize(int claimBufferSize) {
-		this.claimBufferSize = claimBufferSize;
-	}
 
 	/**
 	 * Returns the event processor claim timeout
@@ -305,29 +222,6 @@ public class DisruptorEndpoint extends DefaultEndpoint {
 		this.claimTimeoutUnit = claimTimeoutUnit;
 	}
 
-	/**
-	 * Returns 
-	 * @return the waitStrategy
-	 */
-	public WaitStrategy getWaitStrategy() {
-		return waitStrategy;
-	}
-
-	/**
-	 * Sets the wait strategy that will be used by event processors
-	 * @param waitStrategy the wait Strategy to set
-	 */
-	public void setWaitStrategy(ConsumerWaitStrategy waitStrategy) {
-		this.consumerWaitStrategy = waitStrategy;
-	}
-	
-	/**
-	 * Sets the wait strategy enum name that will be used by event processors
-	 * @param waitStrategyName the wait Strategy enum name to set
-	 */
-	public void setWaitStrategy(CharSequence waitStrategyName) {
-		this.consumerWaitStrategy = ConsumerWaitStrategy.forName(waitStrategyName);
-	}
 	
 
 	/**
@@ -345,6 +239,30 @@ public class DisruptorEndpoint extends DefaultEndpoint {
 	public void setThreadPool(ThreadPoolExecutor threadPool) {
 		this.threadPool = threadPool;
 	}
+	
+    /**
+     * Increments the timeout count for claim failures
+     */
+    void incrementClaimTimeouts() {
+    	claimTimeouts.incrementAndGet();
+    }
+	
+    /**
+     * Returns the number of claim timeouts since the last reset
+     * @return the number of claim timeouts since the last reset
+     */
+    @ManagedAttribute(description="The number of claim timeouts since the last reset")
+    public long getClaimTimeouts() {
+    	return claimTimeouts.get();
+    }
+    
+    /**
+     * Resets the endpoint metrics
+     */
+    @ManagedOperation(description="Resets the endpoint metrics")
+    public void resetMetrics() {
+    	claimTimeouts.set(0L);
+    }
 
 	/**
 	 * Constructs a <code>String</code> with all attributes in <code>name:value</code> format.
@@ -354,17 +272,40 @@ public class DisruptorEndpoint extends DefaultEndpoint {
 	    final String TAB = "\n\t";
 	    StringBuilder retValue = new StringBuilder();    
 	    retValue.append("DisruptorEndpoint [")
-		    .append(TAB).append("ringBuffer:").append(this.ringBuffer)
-		    .append(TAB).append("forceSinglePub:").append(this.forceSinglePub)
-		    .append(TAB).append("claimStrategy:").append(this.claimStrategy)
-		    .append(TAB).append("claimBufferSize:").append(this.claimBufferSize)
+		    .append(TAB).append("disruptor:").append(this.disruptor)
 		    .append(TAB).append("claimTimeout:").append(this.claimTimeout)
 		    .append(TAB).append("claimTimeoutUnit:").append(this.claimTimeoutUnit)
-		    .append(TAB).append("waitStrategy:").append(this.waitStrategy)
-		    .append(TAB).append("consumerWaitStrategy:").append(this.consumerWaitStrategy)
 		    .append(TAB).append("threadPool:").append(this.threadPool)
 	    	.append("\n]");    
 	    return retValue.toString();
+	}
+
+
+	/**
+	 * {@inheritDoc}
+	 * @see org.apache.camel.MultipleConsumersSupport#isMultipleConsumersSupported()
+	 */
+	@Override
+	public boolean isMultipleConsumersSupported() {
+		return true;
+	}
+
+
+	/**
+	 * Returns 
+	 * @return the disruptor
+	 */
+	public Disruptor<ExchangeValueEvent> getDisruptor() {
+		return disruptor;
+	}
+
+
+	/**
+	 * Sets 
+	 * @param disruptor the disruptor to set
+	 */
+	public void setDisruptor(Disruptor<ExchangeValueEvent> disruptor) {
+		this.disruptor = disruptor;
 	}
     
     

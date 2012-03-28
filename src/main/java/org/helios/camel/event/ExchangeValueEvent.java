@@ -24,6 +24,7 @@
  */
 package org.helios.camel.event;
 
+import org.apache.camel.AsyncCallback;
 import org.apache.camel.Exchange;
 
 import com.lmax.disruptor.EventFactory;
@@ -39,6 +40,8 @@ import com.lmax.disruptor.EventFactory;
 public class ExchangeValueEvent {
 	/** The event exchange */
 	private Exchange exchange;
+	/** The async callback indicating the exchange processing is complete */
+	private AsyncCallback callback;
 
 	/**
 	 * Returns the exchange
@@ -62,5 +65,21 @@ public class ExchangeValueEvent {
             return new ExchangeValueEvent();
         }
 	};
+
+	/**
+	 * Returns the {@link AsyncCallback}
+	 * @return the callback
+	 */
+	public AsyncCallback getAsyncCallback() {
+		return callback;
+	}
+
+	/**
+	 * Sets the {@link AsyncCallback}
+	 * @param callback the callback to set
+	 */
+	public void setAsyncCallback(AsyncCallback callback) {
+		this.callback = callback;
+	}
 	
 }

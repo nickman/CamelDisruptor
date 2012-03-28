@@ -16,11 +16,16 @@
  */
 package org.helios.camel;
 
-import java.util.Date;
-
-import org.apache.camel.Exchange;
+import org.apache.camel.Consumer;
+import org.apache.camel.Endpoint;
 import org.apache.camel.Processor;
-import org.apache.camel.impl.ScheduledPollConsumer;
+import org.apache.camel.util.AsyncProcessorConverterHelper;
+import org.apache.log4j.Logger;
+import org.helios.camel.event.ExchangeValueEvent;
+
+import com.lmax.disruptor.EventHandler;
+import com.lmax.disruptor.EventTranslator;
+import com.lmax.disruptor.dsl.Disruptor;
 
 /**
  * The HelloWorld consumer.
@@ -32,31 +37,69 @@ import org.apache.camel.impl.ScheduledPollConsumer;
  * @author Whitehead (nwhitehead AT heliosdev DOT org)
  * <p><code>org.helios.camel.DisruptorConsumer</code></p>
  */
-public class DisruptorConsumer extends ScheduledPollConsumer {
-    private final DisruptorEndpoint endpoint;
-
+public class DisruptorConsumer implements Consumer, EventTranslator<ExchangeValueEvent>, EventHandler<ExchangeValueEvent> {
+    protected final DisruptorEndpoint endpoint;
+    protected final Processor processor;
+    protected final Disruptor<ExchangeValueEvent> disruptor;
+    protected final Logger log;
+    
     public DisruptorConsumer(DisruptorEndpoint endpoint, Processor processor) {
-        super(endpoint, processor);
         this.endpoint = endpoint;
+        log = Logger.getLogger(getClass().getName() + "." + endpoint.getId());
+        this.processor = AsyncProcessorConverterHelper.convert(processor);
+        disruptor = this.endpoint.getDisruptor();
+        disruptor.handleEventsWith(this).then(this);
+    	
     }
 
-    @Override
-    protected int poll() throws Exception {
-        Exchange exchange = endpoint.createExchange();
+	/**
+	 * {@inheritDoc}
+	 * @see org.apache.camel.Service#start()
+	 */
+	@Override
+	public void start() throws Exception {
+		
+	}
 
-        // create a message body
-        Date now = new Date();
-        exchange.getIn().setBody("Hello World! The time is " + now);
+	/**
+	 * {@inheritDoc}
+	 * @see org.apache.camel.Service#stop()
+	 */
+	@Override
+	public void stop() throws Exception {
+		
+	}
 
-        try {
-            // send message to next processor in the route
-            getProcessor().process(exchange);
-            return 1; // number of messages polled
-        } finally {
-            // log exception if an exception occurred and was not handled
-            if (exchange.getException() != null) {
-                getExceptionHandler().handleException("Error processing exchange", exchange, exchange.getException());
-            }
-        }
-    }
+	/**
+	 * {@inheritDoc}
+	 * @see com.lmax.disruptor.EventHandler#onEvent(java.lang.Object, long, boolean)
+	 */
+	@Override
+	public void onEvent(ExchangeValueEvent event, long sequence, boolean endOfBatch) throws Exception {
+		log.info("Handling Exchange [eob:" + endOfBatch + "] Sequence:" + sequence);
+		if(endOfBatch) {
+			event.getAsyncCallback().done(false);
+		} else {
+			this.processor.process(event.getExchange());
+		}
+	}
+
+	/**
+	 * {@inheritDoc}
+	 * @see com.lmax.disruptor.EventTranslator#translateTo(java.lang.Object, long)
+	 */
+	@Override
+	public ExchangeValueEvent translateTo(ExchangeValueEvent event, long sequence) {
+		return event;
+	}
+
+	/**
+	 * {@inheritDoc}
+	 * @see org.apache.camel.Consumer#getEndpoint()
+	 */
+	@Override
+	public Endpoint getEndpoint() {
+		return endpoint;
+	}
+
 }
