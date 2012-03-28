@@ -28,24 +28,34 @@ import org.junit.Test;
  * @author Whitehead (nwhitehead AT heliosdev DOT org)
  * <p><code>org.helios.camel.DistruptorComponentTest</code></p>
  */
-public class DistruptorComponentTest extends CamelTestSupport {
+public class DistruptorComponentTest extends CamelTestSupport {	
+	int messageCount = 10000;
+	
 
-    @Test
-    public void testHelloWorld() throws Exception {
+	@Test
+    public void testDisruptorRoute() throws Exception {
         MockEndpoint mock = getMockEndpoint("mock:result");
-        mock.expectedMinimumMessageCount(1);       
-        
+        mock.expectedMinimumMessageCount(messageCount);       
+        for(int i = 0; i < messageCount; i++) {
+        	template.sendBody("disruptor:from", "Hello World#" + i);
+        }
         assertMockEndpointsSatisfied();
     }
+	
 
     @Override
     protected RouteBuilder createRouteBuilder() throws Exception {
         return new RouteBuilder() {
             public void configure() {
-                from("disruptor://foo")
-                  .to("disruptor://bar")
+                from("disruptor://from")
+                  .to("disruptor://to")
                   .to("mock:result");
             }
         };
+    }
+
+    
+    protected boolean useJmx() {
+        return true;
     }
 }

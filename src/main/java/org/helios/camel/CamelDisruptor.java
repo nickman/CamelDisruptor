@@ -28,6 +28,7 @@ import java.util.concurrent.Executor;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import org.apache.camel.CamelContext;
+import org.apache.log4j.Logger;
 import org.helios.camel.event.ExchangeValueEvent;
 
 import com.lmax.disruptor.ClaimStrategy;
@@ -46,14 +47,17 @@ import com.lmax.disruptor.dsl.Disruptor;
 
 public class CamelDisruptor extends Disruptor<ExchangeValueEvent>  {
 	/** The camel context */
-	protected CamelContext camelContext;
+	protected final CamelContext camelContext;
+	/** The Camel endpoint */
+	protected final DisruptorEndpoint endpoint;
 	/** The disruptor's event processor executor */
 	protected Executor executor;
 	/** Stupid hack to keep a ref to the created executor since it is private in the parent class */
 	protected static final ThreadLocal<Executor> createdExecutor = new ThreadLocal<Executor>();
 	/** Started state flag */
 	protected final AtomicBoolean started = new AtomicBoolean(false);
-	
+	/** Instance Logger */
+	protected final Logger log;
 	
 	
 	/**
@@ -66,8 +70,11 @@ public class CamelDisruptor extends Disruptor<ExchangeValueEvent>  {
 	 */
 	public CamelDisruptor(EventFactory<ExchangeValueEvent> eventFactory, DisruptorEndpoint endpoint, CamelContext camelContext, ClaimStrategy claimStrategy, WaitStrategy waitStrategy) {
 		super(eventFactory, getExecutor(camelContext, endpoint), claimStrategy, waitStrategy);
+		log = Logger.getLogger(getClass().getName() + "-" + endpoint.getId());
 		executor = createdExecutor.get();
 		createdExecutor.remove();
+		this.endpoint = endpoint;
+		this.camelContext = camelContext;
 	}
 	
 	/**
@@ -79,11 +86,17 @@ public class CamelDisruptor extends Disruptor<ExchangeValueEvent>  {
 	 */
 	public CamelDisruptor(EventFactory<ExchangeValueEvent> eventFactory, int ringBufferSize, DisruptorEndpoint endpoint, CamelContext camelContext) {
 		super(eventFactory, ringBufferSize, getExecutor(camelContext, endpoint));	
+		log = Logger.getLogger(getClass().getName() + "-" + endpoint.getId());
 		executor = createdExecutor.get();
-		createdExecutor.remove();		
+		createdExecutor.remove();
+		this.endpoint = endpoint;
+		this.camelContext = camelContext;
 	}
 	
+	
+	
 	public RingBuffer<ExchangeValueEvent> start() {
+		log.info("Starting Disruptor");
 		RingBuffer<ExchangeValueEvent> rb = super.start();
 		started.set(true);
 		return rb;
@@ -103,6 +116,27 @@ public class CamelDisruptor extends Disruptor<ExchangeValueEvent>  {
 		Executor executor = camelContext.getExecutorServiceManager().newCachedThreadPool(endpoint, "Disruptor");
 		createdExecutor.set(executor);
 		return executor;
+	}
+
+	/**
+	 * @return the executor
+	 */
+	public Executor getExecutor() {
+		return executor;
+	}
+
+	/**
+	 * Constructs a <code>String</code> with all attributes in <code>name:value</code> format.
+	 * @return a <code>String</code> representation of this object.
+	 */
+	public String toString() {	    
+	    StringBuilder retValue = new StringBuilder();    
+	    retValue.append("CamelDisruptor [")
+		    .append("camelContext:").append(this.camelContext.getName())
+		    .append(" endpoint:").append(this.endpoint.getId()).append("(").append(this.endpoint.getEndpointUri()).append(")")
+		    .append(" started:").append(this.started)
+		    .append("]");
+	    return retValue.toString();
 	}
 
 	

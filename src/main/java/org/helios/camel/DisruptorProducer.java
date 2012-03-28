@@ -16,19 +16,23 @@
  */
 package org.helios.camel;
 
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
 import org.apache.camel.AsyncCallback;
 import org.apache.camel.Exchange;
+import org.apache.camel.ExchangeTimedOutException;
+import org.apache.camel.WaitForTaskToComplete;
 import org.apache.camel.impl.DefaultAsyncProducer;
+import org.apache.camel.support.SynchronizationAdapter;
 import org.apache.camel.util.ExchangeHelper;
 import org.helios.camel.event.ExchangeValueEvent;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import com.lmax.disruptor.EventTranslator;
 import com.lmax.disruptor.RingBuffer;
 import com.lmax.disruptor.TimeoutException;
-import com.lmax.disruptor.dsl.Disruptor;
 
 /**
  * <p>Title: DisruptorProducer</p>
@@ -37,15 +41,13 @@ import com.lmax.disruptor.dsl.Disruptor;
  * @author Whitehead (nwhitehead AT heliosdev DOT org)
  * <p><code>org.helios.camel.DisruptorProducer</code></p>
  */
-public class DisruptorProducer extends DefaultAsyncProducer  {
-    /** Static class logger */
-    private static final transient Logger LOG = LoggerFactory.getLogger(DisruptorProducer.class);
+public class DisruptorProducer extends DefaultAsyncProducer {
     /** The endpoint that created this producer */
     protected final DisruptorEndpoint endpoint;
     /** The disruptor's ring buffer */
     protected final RingBuffer<ExchangeValueEvent> ringBuffer;    
 	/** The endpoint's disruptor */
-	protected final Disruptor<ExchangeValueEvent> disruptor;
+	protected final CamelDisruptor disruptor;
 	/** The claim timeout when calling {@link RingBuffer#next(long, java.util.concurrent.TimeUnit)}. Defaults to {@link DisruptorEndpoint#DEFAULT_CLAIM_TIMEOUT}. Values of <code>< 1</code> will not have a timeout.*/
 	protected final long claimTimeout;
 	/** The claim timeout unit when calling {@link RingBuffer#next(long, java.util.concurrent.TimeUnit)}. Defaults to {@link DisruptorEndpoint#DEFAULT_CLAIM_TIMEOUT_UNIT}*/
@@ -54,6 +56,8 @@ public class DisruptorProducer extends DefaultAsyncProducer  {
 	protected final boolean copyExchange;
 	/** Indicates if a claim timeout is active */
 	protected final boolean timeoutActive;
+	/** Indicates if the disruptor is started */
+	protected boolean disruptorStarted = false;
 
 
     /**
@@ -64,7 +68,7 @@ public class DisruptorProducer extends DefaultAsyncProducer  {
      * @param claimTimeout The ringbuffer sequence claim timeout
      * @param claimTimeoutUnit The ringbuffer sequence claim timeout unit
      */
-    public DisruptorProducer(DisruptorEndpoint endpoint, Disruptor<ExchangeValueEvent> disruptor, boolean copyExchange, long claimTimeout, TimeUnit claimTimeoutUnit) {    	
+    public DisruptorProducer(DisruptorEndpoint endpoint, CamelDisruptor disruptor, boolean copyExchange, long claimTimeout, TimeUnit claimTimeoutUnit) {    	
         super(endpoint);    
         this.endpoint = endpoint;
         this.disruptor = disruptor;
@@ -73,7 +77,7 @@ public class DisruptorProducer extends DefaultAsyncProducer  {
         this.claimTimeout = claimTimeout;
         this.claimTimeoutUnit = claimTimeoutUnit;
         timeoutActive = claimTimeout > 0;        
-        if(LOG.isDebugEnabled()) LOG.info("Created DisruptorProducer for endpoint [" + getEndpoint().getEndpointUri() + "]");
+        log.info("Created DisruptorProducer for endpoint [{}]", endpoint.getEndpointUri());
     }
 
     /**
@@ -83,18 +87,146 @@ public class DisruptorProducer extends DefaultAsyncProducer  {
      * @return (doneSync) true to continue execute synchronously, false to continue being executed asynchronously
      */
     public boolean process(final Exchange exchange, final AsyncCallback callback) {
-    	long sequence = -1;
-    	try {
-    		sequence = timeoutActive ?  ringBuffer.next(claimTimeout, claimTimeoutUnit) : ringBuffer.next();
-    	} catch (TimeoutException te) {
-    		incrementClaimTimeouts();
-    		throw new IllegalStateException("The ring buffer in endpoint [" + endpoint.getEndpointUri() + "] timed out attempting to publish exchange [" + exchange.getExchangeId() + "]", te);
+    	log.trace("Processing Exchange [{}]", exchange.getExchangeId());
+    	checkDisruptorStarted();
+        //return false;
+        WaitForTaskToComplete wait = null;
+        if (exchange.getProperty(Exchange.ASYNC_WAIT) != null) {
+            wait = exchange.getProperty(Exchange.ASYNC_WAIT, WaitForTaskToComplete.class);
+        }
+
+        if (wait!=null && (wait == WaitForTaskToComplete.Always
+            || (wait == WaitForTaskToComplete.IfReplyExpected && ExchangeHelper.isOutCapable(exchange)))) {
+
+            // do not handover the completion as we wait for the copy to complete, and copy its result back when it done
+            Exchange copy = prepareCopy(exchange, false);
+
+            // latch that waits until we are complete
+            final CountDownLatch latch = new CountDownLatch(1);
+
+            // we should wait for the reply so install a on completion so we know when its complete
+            copy.addOnCompletion(new SynchronizationAdapter() {
+                @Override
+                public void onDone(Exchange response) {
+                    // check for timeout, which then already would have invoked the latch
+                    if (latch.getCount() == 0) {
+                        if (log.isTraceEnabled()) {
+                            log.trace("{}. Timeout occurred so response will be ignored: {}", this, response.hasOut() ? response.getOut() : response.getIn());
+                        }
+                        return;
+                    } else {
+                        if (log.isTraceEnabled()) {
+                            log.trace("{} with response: {}", this, response.hasOut() ? response.getOut() : response.getIn());
+                        }
+                        try {
+                            ExchangeHelper.copyResults(exchange, response);
+                        } finally {
+                            // always ensure latch is triggered
+                            latch.countDown();
+                        }
+                    }
+                }
+
+                @Override
+                public boolean allowHandover() {
+                    // do not allow handover as we want to seda producer to have its completion triggered
+                    // at this point in the routing (at this leg), instead of at the very last (this ensure timeout is honored)
+                    return false;
+                }
+
+                @Override
+                public String toString() {
+                    return "onDone at [" + endpoint.getEndpointUri() + "]";
+                }
+            });
+
+            log.trace("Adding Exchange to queue: {}", copy);
+            publishEvent(copy, callback);
+
+            if (claimTimeout > 0) {
+                if (log.isTraceEnabled()) {
+                    log.trace("Waiting for task to complete using timeout (ms): {} at [{}]", claimTimeout, endpoint.getEndpointUri());
+                }
+                // lets see if we can get the task done before the timeout
+                boolean done = false;
+                try {
+                    done = latch.await(claimTimeout, TimeUnit.MILLISECONDS);
+                } catch (InterruptedException e) {
+                    // ignore
+                }
+                if (!done) {
+                    exchange.setException(new ExchangeTimedOutException(exchange, claimTimeout));
+                    // count down to indicate timeout
+                    latch.countDown();
+                    // remove   timed out Exchange from queue
+                    // =====================================================
+                    // What is the equivalent of queue.remove(copy) ?
+                    // =====================================================
+                    //queue.remove(copy);
+                }
+            } else {
+                if (log.isTraceEnabled()) {
+                    log.trace("Waiting for task to complete (blocking) at [{}]", endpoint.getEndpointUri());
+                }
+                // no timeout then wait until its done
+                try {
+                    latch.await();
+                } catch (InterruptedException e) {
+                    // ignore
+                }
+            }
+        } else {
+            // no wait, eg its a InOnly then just add to queue and return
+            // handover the completion so its the copy which performs that, as we do not wait
+            Exchange copy = prepareCopy(exchange, true);
+            log.trace("Adding Exchange to queue: {}", copy);
+            publishEvent(copy, callback);
+        }
+
+        // we use OnCompletion on the Exchange to callback and wait for the Exchange to be done
+        // so we should just signal the callback we are done synchronously
+        callback.done(true);
+        return true;
+    	
+    }
+    
+    /**
+     * Starts the disruptor if not already started
+     */
+    protected void checkDisruptorStarted() {
+    	if(!disruptorStarted) {
+    		if(!disruptor.isStarted()) {
+    			disruptor.start();
+    		}
     	}
-    	ExchangeValueEvent event = ringBuffer.get(sequence);
-    	event.setExchange(copyExchange ? prepareCopy(exchange, true) : exchange); 
-    	event.setAsyncCallback(callback);
-    	ringBuffer.publish(sequence);
-        return false;
+    	disruptorStarted = true;    	
+    }
+    
+    /**
+     * Publishes the exchange into the ring buffer
+     * @param exchange the exchange to publish
+     * @param callback the async callback
+     */
+    protected void publishEvent(final Exchange exchange, final AsyncCallback callback) {
+    	disruptor.publishEvent(new EventTranslator<ExchangeValueEvent>(){
+    		public ExchangeValueEvent translateTo(ExchangeValueEvent event, long sequence) {
+    			event.setExchange(exchange);
+    			event.setAsyncCallback(callback);
+    			return event;
+    		}
+    	});
+//    	long sequence = -1;
+//    	try {
+//    		sequence = timeoutActive ?  ringBuffer.next(claimTimeout, claimTimeoutUnit) : ringBuffer.next();
+//    	} catch (TimeoutException te) {
+//    		incrementClaimTimeouts();
+//    		throw new IllegalStateException("The ring buffer in endpoint [" + endpoint.getEndpointUri() + "] timed out attempting to publish exchange [" + exchange.getExchangeId() + "]", te);
+//    	}
+//    	ExchangeValueEvent event = ringBuffer.get(sequence);
+//    	event.setExchange(copyExchange ? prepareCopy(exchange, true) : exchange); 
+//    	event.setAsyncCallback(callback);
+//    	ringBuffer.publish(sequence);
+    	
     }
     
     
@@ -137,6 +269,32 @@ public class DisruptorProducer extends DefaultAsyncProducer  {
     protected void incrementClaimTimeouts() {
     	endpoint.incrementClaimTimeouts();
     }
+
+	/**
+	 * {@inheritDoc}
+	 * @see org.apache.camel.Processor#process(org.apache.camel.Exchange)
+	 */
+	@Override
+	public void process(Exchange exchange) throws Exception {
+    	if(!disruptorStarted) {
+    		if(!disruptor.isStarted()) {
+    			disruptor.start();
+    		}
+    	}
+    	disruptorStarted = true;
+    	long sequence = -1;
+    	try {
+    		sequence = timeoutActive ?  ringBuffer.next(claimTimeout, claimTimeoutUnit) : ringBuffer.next();
+    	} catch (TimeoutException te) {
+    		incrementClaimTimeouts();
+    		throw new IllegalStateException("The ring buffer in endpoint [" + endpoint.getEndpointUri() + "] timed out attempting to publish exchange [" + exchange.getExchangeId() + "]", te);
+    	}
+    	ExchangeValueEvent event = ringBuffer.get(sequence);
+    	event.setExchange(copyExchange ? prepareCopy(exchange, true) : exchange); 
+    	ringBuffer.publish(sequence);
+	}
+
+
 
 
 }

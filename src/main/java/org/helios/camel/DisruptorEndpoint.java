@@ -19,6 +19,7 @@ package org.helios.camel;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CopyOnWriteArraySet;
+import java.util.concurrent.Executor;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
@@ -33,10 +34,8 @@ import org.apache.camel.api.management.ManagedOperation;
 import org.apache.camel.api.management.ManagedResource;
 import org.apache.camel.impl.DefaultEndpoint;
 import org.apache.log4j.Logger;
-import org.helios.camel.event.ExchangeValueEvent;
 
 import com.lmax.disruptor.RingBuffer;
-import com.lmax.disruptor.dsl.Disruptor;
 
 /**
  * <p>Title: DisruptorEndpoint</p>
@@ -48,7 +47,7 @@ import com.lmax.disruptor.dsl.Disruptor;
 @ManagedResource(description = "Managed DisruptorEndpoint")
 public class DisruptorEndpoint extends DefaultEndpoint implements MultipleConsumersSupport {
 	/** The endpoint's disruptor */
-	protected Disruptor<ExchangeValueEvent> disruptor;
+	protected CamelDisruptor disruptor;
 	/** The claim timeout when calling {@link RingBuffer#next(long, java.util.concurrent.TimeUnit)}. Defaults to {@link DisruptorEndpoint#DEFAULT_CLAIM_TIMEOUT}. Values of <code>< 1</code> will not have a timeout.*/
 	protected long claimTimeout = -1;
 	/** The claim timeout unit when calling {@link RingBuffer#next(long, java.util.concurrent.TimeUnit)}. Defaults to {@link DisruptorEndpoint#DEFAULT_CLAIM_TIMEOUT_UNIT}*/
@@ -56,7 +55,7 @@ public class DisruptorEndpoint extends DefaultEndpoint implements MultipleConsum
 	/** If true, a copy of the exchange will be published to the ring buffer, otherwise, the same instance will be published */
 	protected boolean copyExchange;	
 	/** The executor thread pool built to execute event processors */
-	protected ThreadPoolExecutor threadPool = null;
+	protected Executor threadPool = null;
 	/** A set of the current disruptor producers */
     private final Set<DisruptorProducer> producers = new CopyOnWriteArraySet<DisruptorProducer>();
     /** A set of the current disruptor consumers */
@@ -129,7 +128,8 @@ public class DisruptorEndpoint extends DefaultEndpoint implements MultipleConsum
      */
     @Override
     public void configureProperties(Map<String, Object> options) {
-    	disruptor = (Disruptor)options.get("disruptor");
+    	disruptor = (CamelDisruptor)options.get("disruptor");
+    	threadPool = disruptor.getExecutor();
     }    
     
     
@@ -138,8 +138,8 @@ public class DisruptorEndpoint extends DefaultEndpoint implements MultipleConsum
      * @see org.apache.camel.impl.DefaultEndpoint#doStart()
      */
     protected void doStart() {
-    	log.info("Starting Disruptor");
-    	disruptor.start();
+    	
+    	//disruptor.start();
     }
     
     /**
@@ -228,7 +228,7 @@ public class DisruptorEndpoint extends DefaultEndpoint implements MultipleConsum
 	 * Returns the event processor thread pool
 	 * @return the event processor thread pool
 	 */
-	public ThreadPoolExecutor getThreadPool() {
+	public Executor getThreadPool() {
 		return threadPool;
 	}
 
@@ -295,7 +295,7 @@ public class DisruptorEndpoint extends DefaultEndpoint implements MultipleConsum
 	 * Returns 
 	 * @return the disruptor
 	 */
-	public Disruptor<ExchangeValueEvent> getDisruptor() {
+	public CamelDisruptor getDisruptor() {
 		return disruptor;
 	}
 
@@ -304,7 +304,7 @@ public class DisruptorEndpoint extends DefaultEndpoint implements MultipleConsum
 	 * Sets 
 	 * @param disruptor the disruptor to set
 	 */
-	public void setDisruptor(Disruptor<ExchangeValueEvent> disruptor) {
+	public void setDisruptor(CamelDisruptor disruptor) {
 		this.disruptor = disruptor;
 	}
     

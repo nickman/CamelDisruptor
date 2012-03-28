@@ -16,16 +16,18 @@
  */
 package org.helios.camel;
 
+import org.apache.camel.AsyncProcessor;
 import org.apache.camel.Consumer;
 import org.apache.camel.Endpoint;
 import org.apache.camel.Processor;
 import org.apache.camel.util.AsyncProcessorConverterHelper;
-import org.apache.log4j.Logger;
+
 import org.helios.camel.event.ExchangeValueEvent;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import com.lmax.disruptor.EventHandler;
 import com.lmax.disruptor.EventTranslator;
-import com.lmax.disruptor.dsl.Disruptor;
 
 /**
  * The HelloWorld consumer.
@@ -39,18 +41,42 @@ import com.lmax.disruptor.dsl.Disruptor;
  */
 public class DisruptorConsumer implements Consumer, EventTranslator<ExchangeValueEvent>, EventHandler<ExchangeValueEvent> {
     protected final DisruptorEndpoint endpoint;
-    protected final Processor processor;
-    protected final Disruptor<ExchangeValueEvent> disruptor;
+    protected final AsyncProcessor processor;
+    protected final CamelDisruptor disruptor;
     protected final Logger log;
+    protected boolean disruptorStarted = false;
     
-    public DisruptorConsumer(DisruptorEndpoint endpoint, Processor processor) {
+    @SuppressWarnings("unchecked")
+	public DisruptorConsumer(DisruptorEndpoint endpoint, Processor processor) {
         this.endpoint = endpoint;
-        log = Logger.getLogger(getClass().getName() + "." + endpoint.getId());
+        log = LoggerFactory.getLogger(getClass().getName() + "-" + endpoint.getId());
         this.processor = AsyncProcessorConverterHelper.convert(processor);
+        //this.processor = processor;
         disruptor = this.endpoint.getDisruptor();
-        disruptor.handleEventsWith(this).then(this);
-    	
+        disruptor.handleEventsWith(this).then(new EventHandler<ExchangeValueEvent>(){
+        	/**
+        	 * {@inheritDoc}
+        	 * @see com.lmax.disruptor.EventHandler#onEvent(java.lang.Object, long, boolean)
+        	 */
+        	@Override
+        	public void onEvent(ExchangeValueEvent event, long sequence,
+        			boolean endOfBatch) throws Exception {
+        		event.getAsyncCallback().done(false);
+        		
+        	}
+        });    	
     }
+    
+	/**
+	 * {@inheritDoc}
+	 * @see com.lmax.disruptor.EventHandler#onEvent(java.lang.Object, long, boolean)
+	 */
+	@Override
+	public void onEvent(ExchangeValueEvent event, long sequence, boolean endOfBatch) throws Exception {
+		
+		log.debug("Handling Exchange [eob:{}] Sequence:{} Exchange [{}] Processor [{}]", new Object[]{endOfBatch, sequence, event.getExchange().getExchangeId(), processor});
+		this.processor.process(event.getExchange(), event.getAsyncCallback());
+	}    
 
 	/**
 	 * {@inheritDoc}
@@ -58,7 +84,13 @@ public class DisruptorConsumer implements Consumer, EventTranslator<ExchangeValu
 	 */
 	@Override
 	public void start() throws Exception {
-		
+		log.info("Starting");
+    	if(!disruptorStarted) {
+    		if(!disruptor.isStarted()) {
+    			disruptor.start();
+    		}
+    	}
+    	disruptorStarted = true;		
 	}
 
 	/**
@@ -67,22 +99,9 @@ public class DisruptorConsumer implements Consumer, EventTranslator<ExchangeValu
 	 */
 	@Override
 	public void stop() throws Exception {
-		
+		log.info("Stopping");
 	}
 
-	/**
-	 * {@inheritDoc}
-	 * @see com.lmax.disruptor.EventHandler#onEvent(java.lang.Object, long, boolean)
-	 */
-	@Override
-	public void onEvent(ExchangeValueEvent event, long sequence, boolean endOfBatch) throws Exception {
-		log.info("Handling Exchange [eob:" + endOfBatch + "] Sequence:" + sequence);
-		if(endOfBatch) {
-			event.getAsyncCallback().done(false);
-		} else {
-			this.processor.process(event.getExchange());
-		}
-	}
 
 	/**
 	 * {@inheritDoc}

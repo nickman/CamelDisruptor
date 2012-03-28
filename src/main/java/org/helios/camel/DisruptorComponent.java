@@ -20,6 +20,7 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
 
+import org.apache.camel.CamelContext;
 import org.apache.camel.Endpoint;
 import org.apache.camel.impl.DefaultComponent;
 import org.helios.camel.event.ExchangeValueEvent;
@@ -66,7 +67,28 @@ public class DisruptorComponent extends DefaultComponent {
 	/** A map of created Disruptor resident and referenced in disruptor endpoints */
 	private final Map<String, Disruptor<ExchangeValueEvent>> disruptors = new HashMap<String, Disruptor<ExchangeValueEvent>>();
 	
+	/**
+	 * Creates a new DisruptorComponent
+	 */
+	public DisruptorComponent() {
+		super();
+	}
+
+	/**
+	 * Creates a new DisruptorComponent
+	 * @param context The CamelContext
+	 */
+	public DisruptorComponent(CamelContext context) {
+	        super(context);
+	}
 	
+    public CamelContext getCamelContext() {
+        return super.getCamelContext();
+    }
+
+    public void setCamelContext(CamelContext context) {
+        super.setCamelContext(context);
+    }	
     /**
      * Creates or retrieves the disruptor identified and confirable by the passed parameters
      * @param uri The component URI
